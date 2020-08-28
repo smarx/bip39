@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"golang.org/x/crypto/pbkdf2"
 )
 
@@ -90,8 +91,80 @@ func deriveSeed(mnemonic, password string) []byte {
 		sha512.New)                  // hash function
 }
 
+func isValid(mnemonic []string, checksumBits int, reverseWords map[string]int) bool {
+	bytes := new(big.Int)
+
+	for _, word := range mnemonic {
+		bytes.Lsh(bytes, 11)
+		bytes.Add(bytes, big.NewInt(int64(reverseWords[word])))
+	}
+
+	checksum := new(big.Int)
+	bytes.DivMod(bytes, big.NewInt(2<<(checksumBits-1)), checksum)
+
+	return checksum.Cmp(computeChecksum(bytes.Bytes())) == 0
+}
+
+func findPossibleSeeds(mnemonic []string, invalidWords []int, checksumBits int, wordList []string, reverseWords map[string]int) {
+	if len(invalidWords) == 0 {
+		if isValid(mnemonic, checksumBits, reverseWords) {
+			seed := deriveSeed(strings.Join(mnemonic, " "), "")
+			fmt.Printf("%0x -> %0x\n", seed, deriveAddress(seed))
+		}
+		return
+	}
+
+	for _, word := range wordList {
+		mnemonic[invalidWords[0]] = word
+		findPossibleSeeds(mnemonic, invalidWords[1:], checksumBits, wordList, reverseWords)
+	}
+}
+
+func crack(mnemonicString string) {
+	mnemonic := strings.Split(mnemonicString, " ")
+
+	reverseWords := make(map[string]int)
+	wordList := loadWords("english-wordlist.txt")
+	for i, word := range wordList {
+		reverseWords[word] = i
+	}
+
+	reverseChecksum := map[int]int{12: 4, 15: 5, 18: 6, 21: 7, 24: 8}
+	checksumBits, ok := reverseChecksum[len(mnemonic)]
+	if !ok {
+		log.Fatal("Invalid number of words in the mnemonic.")
+	}
+
+	invalidWords := make([]int, 0)
+
+	for i, word := range mnemonic {
+		if _, ok := reverseWords[word]; !ok {
+			invalidWords = append(invalidWords, i)
+		}
+	}
+
+	findPossibleSeeds(mnemonic, invalidWords, checksumBits, wordList, reverseWords)
+}
+
+func deriveAddress(seed []byte) []byte {
+	// just use the first 32 bytes of the seed as a private key
+	privateKey, err := crypto.ToECDSA(seed[:32])
+	if err != nil {
+		log.Fatal(err)
+	}
+	return crypto.PubkeyToAddress(privateKey.PublicKey).Bytes()
+}
+
 func main() {
-	mnemonic := generateMnemonic(makeEntropy(128))
-	fmt.Printf("Mnemonic: %s\n", mnemonic)
-	fmt.Printf("Derived seed: %0x\n", deriveSeed(mnemonic, ""))
+	if len(os.Args) == 1 {
+		mnemonic := generateMnemonic(makeEntropy(128))
+		fmt.Printf("Mnemonic: %s\n", mnemonic)
+		seed := deriveSeed(mnemonic, "")
+		fmt.Printf("Derived seed: %0x\n", seed)
+		fmt.Printf("Derived address: %0x\n", deriveAddress(seed))
+	} else {
+		// join arguments to avoid having to quote mnemonic
+		mnemonic := strings.Join(os.Args[1:], " ")
+		crack(mnemonic)
+	}
 }
